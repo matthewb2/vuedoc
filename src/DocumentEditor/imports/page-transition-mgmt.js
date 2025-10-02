@@ -26,7 +26,7 @@ function find_sub_child_sibling_node (container, s_tag){
  * @param {boolean?} not_first_child Should be unset. Used internally to let at least one child in the page
  */
 function move_children_forward_recursively (child, child_sibling, stop_condition, do_not_break, not_first_child) {
-
+//console.log(child.childNodes.length);
   // if the child still has nodes and the current page still overflows
   while(child.childNodes.length && !stop_condition()){
 
