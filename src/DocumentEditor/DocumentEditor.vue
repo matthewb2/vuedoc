@@ -33,9 +33,13 @@ import { defineCustomElement } from "vue";
 import {
   move_children_forward_recursively,
   move_children_backwards_with_merging,
+  move_overflowing_content_forward,
 } from "./imports/page-transition-mgmt.js";
 
 let total_textHeight = 0;
+const BATCH_SIZE = 10; // 💡 여기서 정의
+const HEIGHT_CHECK_INTERVAL = 3;
+
 export default {
   created() {
     // ... 기존 event listener 유지 ...
@@ -191,17 +195,120 @@ export default {
       });
       return visible_pages.length > 0 ? visible_pages : [0];
     },
+    /**
+     * 정비된 로직에 따라 모든 페이지의 오버플로우를 순차적으로 처리합니다.
+     * @param {number} start_page_idx - 콘텐츠 전파를 시작할 페이지 인덱스 (보통 0 또는 보이는 페이지).
+     * @returns {Promise<void>}
+     */
+    async forward_propagate_content(start_page_idx = 0) {
+      if (this.pages.length < 1) return;
+
+      let page_idx = start_page_idx;
+
+      // 💡 [수정]: while 루프를 사용하여 페이지가 끝날 때까지 반복
+      // 페이지 인덱스가 현재 페이지 배열의 길이보다 작을 때까지만 반복합니다.
+      while (page_idx < this.pages.length) {
+        const currentPage = this.pages[page_idx];
+        const currentPageElt = currentPage.elt;
+        // 💡 [새로 추가된 로직]: 최상위 DIV 래퍼 제거
+        // currentPageElt가 하나의 자식(<div> 래퍼)을 가지고 있는지 확인
+        if (
+          currentPageElt.children.length === 1 &&
+          currentPageElt.firstElementChild.tagName === "DIV"
+        ) {
+          const wrapperDiv = currentPageElt.firstElementChild;
+
+          // wrapperDiv의 자식들(<p> 태그)을 역순으로 currentPageElt로 이동
+          // (prepend를 사용하면 원래 순서를 유지할 수 있습니다.)
+          while (wrapperDiv.firstChild) {
+            currentPageElt.prepend(wrapperDiv.lastChild);
+          }
+
+          // 최상위 wrapperDiv 제거
+          currentPageElt.removeChild(wrapperDiv);
+        }
+        const pageHeightLimit = currentPage.height;
+
+        if (!currentPageElt) {
+          console.warn(
+            `Page DOM element not found for index ${page_idx}. Skipping.`
+          );
+          page_idx++; // 다음 페이지로 이동 시도
+          continue;
+        }
+
+        // 뷰포트에게 숨 쉴 틈 주기
+        if (page_idx % 5 === 0) {
+          await this.yieldToBrowser();
+        }
+
+        // 1. 오버플로우 검사 및 정방향 탐색 (기존 로직 유지)
+        const children = Array.from(currentPageElt.children);
+        //console.log(children.length);
+        let firstOverflowingElement = null;
+
+        for (const child of children) {
+          if (child.offsetTop + child.offsetHeight > this.pages_height) {
+            firstOverflowingElement = child;
+            console.log(child.offsetTop, child.offsetHeight, this.pages_height);
+            break;
+          }
+        }
+
+        // 2. 오버플로우 처리
+        if (firstOverflowingElement) {
+          // 2-1. 다음 페이지 생성/확보
+          let nextPageElt;
+
+          // 💡 [수정]: 다음 페이지가 없는 경우에만 새 페이지를 배열에 추가합니다.
+          if (page_idx + 1 >= this.pages.length) {
+            // this.pages.length가 증가합니다. while 루프의 조건이 만족되도록 합니다.
+            this.pages.push(this.getNewPageData());
+            await this.$nextTick();
+            this.update_pages_elts();
+          }
+          nextPageElt = this.pages[page_idx + 1].elt;
+
+          // 2-2. 전체 이동 (다음 문장부터 끝까지) - 로직 유지
+          let siblingToMove = firstOverflowingElement.nextElementSibling;
+          while (siblingToMove) {
+            const next = siblingToMove.nextElementSibling;
+            nextPageElt.prepend(siblingToMove);
+            siblingToMove = next;
+          }
+
+          // 2-3. 오버플로우 해소 (move_children_forward_recursively 호출) - 로직 유지
+          await this.move_children_forward_recursively(
+            currentPageElt,
+            nextPageElt,
+            pageHeightLimit,
+            this.doNotBreakSelectors
+          );
+
+          // 🛑 [핵심]: 오버플로우가 해소되었으므로, 다음 페이지로 넘어가서 (page_idx++)
+          // 그 다음 페이지(새로 생성된 페이지)의 오버플로우를 검사해야 합니다.
+          page_idx++;
+        } else {
+          // 3. 오버플로우가 없으면 (분할 완료)
+          // 현재 페이지의 오버플로우가 해소되었거나 처음부터 없었으므로 다음 페이지로 이동합니다.
+
+          // 💡 [수정]: 현재 페이지가 비어있고, 이전 페이지에서 이동된 내용이 없다면,
+          // 더 이상 분할할 필요가 없음을 의미합니다.
+          if (page_idx > 0 && currentPageElt.children.length === 0) {
+            // 빈 페이지를 제거하고 루프를 종료하거나 남은 빈 페이지를 정리하는 로직이 필요합니다.
+            // 여기서는 안전하게 다음 페이지로 이동합니다.
+          }
+
+          page_idx++;
+        }
+      }
+    },
 
     /**
      * 비동기 처리를 위해 메인 스레드 제어권을 브라우저에 즉시 양보합니다.
      * @returns {Promise<void>}
      */
-    async yieldToBrowser() {
-      // Vue.nextTick을 사용하여 DOM이 업데이트되기를 기다립니다.
-      // 이는 clientHeight 측정의 정확도를 높입니다.
-      await this.$nextTick();
-
-      // 추가적으로 메인 스레드에 제어권을 확실히 양보합니다.
+    yieldToBrowser() {
       return new Promise((resolve) => setTimeout(resolve, 0));
     },
     // Resets all content from the content property
@@ -351,34 +458,42 @@ export default {
           */
           // FORWARD-PROPAGATION
           // check if content overflows
-          if (total_textHeight - page.elt.clientHeight < 1500) {
-            try {
-              if (page.elt.clientHeight > this.pages_height) {
-                console.log(page.elt.clientHeight);
-                // if there is no next page for the same content, create it
-                if (!next_page || next_page.content_idx != page.content_idx) {
-                  next_page = {
-                    uuid: this.new_uuid(),
-                    content_idx: page.content_idx,
-                  };
-                  this.pages.splice(page_idx + 1, 0, next_page);
-                  this.update_pages_elts();
-                  next_page_elt = next_page.elt;
-                }
-                // move the content step by step to the next page, until it fits
-                move_children_forward_recursively(
-                  page.elt,
-                  next_page_elt,
-                  () => page.elt.clientHeight <= this.pages_height,
-                  this.do_not_break
-                );
+          //if (total_textHeight - page.elt.clientHeight < 1500) {
+
+          try {
+            if (page.elt.clientHeight > this.pages_height) {
+              console.log(page.elt.clientHeight);
+              // 💡 [필수]: Vue가 DOM에 새 페이지를 렌더링할 때까지 기다립니다.
+              await this.$nextTick();
+
+              // (선택적) DOM에 완전히 적용될 때까지 한번 더 기다립니다.
+              await this.$nextTick();
+              // if there is no next page for the same content, create it
+              if (!next_page || next_page.content_idx != page.content_idx) {
+                next_page = {
+                  uuid: this.new_uuid(),
+                  content_idx: page.content_idx,
+                };
+                this.pages.splice(page_idx + 1, 0, next_page);
+                this.update_pages_elts();
+                next_page_elt = next_page.elt;
               }
-            } finally {
-              this.fit_in_progress = false; // 에러가 나든 정상 종료되든 플래그 해제
-              this.$nextTick(() => {
-                this.emit_new_content();
-              });
+              // move the content step by step to the next page, until it fits
+
+              move_children_forward_recursively(
+                page.elt,
+                next_page_elt,
+                () => page.elt.clientHeight <= this.pages_height,
+                this.do_not_break
+              );
+              await this.yieldToBrowser();
             }
+          } catch (err) {
+            console.error("페이지 분할 중 오류 발생:", err);
+          } finally {
+            this.fit_in_progress = false; // 에러가 나든 정상 종료되든 플래그 해제
+            await this.$nextTick();
+            this.emit_new_content();
           }
           // CLEANING
           // remove next page if it is empty
@@ -612,6 +727,11 @@ export default {
 
     // Update pages <div> from this.pages data
     update_pages_elts() {
+      // 🛑 [안전 검사]: this.$refs.content가 null이 아닌지 확인합니다.
+      if (!this.$refs.content) {
+        console.warn("Cannot find page container ref. Skipping DOM update.");
+        return;
+      }
       // Removing deleted pages
       const deleted_pages = [...this.$refs.content.children].filter(
         (page_elt) => !this.pages.find((page) => page.elt == page_elt)

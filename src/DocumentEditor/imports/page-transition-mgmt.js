@@ -28,14 +28,14 @@ function find_sub_child_sibling_node (container, s_tag){
 function move_children_forward_recursively (child, child_sibling, stop_condition, do_not_break, not_first_child) {
 //console.log(child.childNodes.length);
   // if the child still has nodes and the current page still overflows
-  while(child.childNodes.length && !stop_condition()){
-
+  //while(child.childNodes.length && !stop_condition()){
+	/*
     // check if page has only one child tree left
     not_first_child = not_first_child || (child.childNodes.length != 1);
-
+	
     // select the last sub-child
     const sub_child = child.lastChild;
-
+	
     // if it is a text node, move its content to next page word(/space) by word
     if(sub_child.nodeType == Node.TEXT_NODE){
       const sub_child_hashes = sub_child.textContent.match(/(\s|\S+)/g);
@@ -49,7 +49,54 @@ function move_children_forward_recursively (child, child_sibling, stop_condition
         if(stop_condition()) return;
       }
     }
+	*/
+  let BATCH_SIZE = 20; // 💡 여기서 정의
+  let HEIGHT_CHECK_INTERVAL = 3;
+  // 💡 [최적화 초기화]: 반복 횟수 카운터
+  let loop_counter = 0; 
+  
+  while(child.childNodes.length && !stop_condition()){
+    
+    not_first_child = not_first_child || (child.childNodes.length != 1);
+    const sub_child = child.lastChild;
 
+    // =================================================================
+    // 🛑 [주요 수정]: 텍스트 노드 처리 (성능 병목 구간)
+    // =================================================================
+    if(sub_child.nodeType == Node.TEXT_NODE){
+      const sub_child_hashes = sub_child.textContent.match(/(\s|\S+)/g);
+      const sub_child_continuation = document.createTextNode('');
+      child_sibling.prepend(sub_child_continuation);
+      
+      const l = sub_child_hashes ? sub_child_hashes.length : 0;
+
+      // 💡 [배치 처리 루프]: 토큰을 역순으로 처리합니다.
+      for(let i = 0; i < l; i += BATCH_SIZE) { 
+        
+        // i는 토큰을 몇 개나 다음 페이지로 보냈는지 추적합니다.
+        
+        // 1. 🛑 [배치 크기 계산]: 한 번에 옮길 토큰/단어의 실제 개수
+        const tokens_to_move = Math.min(BATCH_SIZE, l - i);
+        
+        // 2. [안전 장치]: 마지막 토큰이면서 페이지의 첫 번째 토큰이면 이동하지 않고 종료
+        if (l - (i + tokens_to_move) == 0 && !not_first_child) return; 
+
+        // 3. [텍스트 이동 계산]:
+        const new_l = l - i - tokens_to_move; // 현재 페이지에 남을 토큰의 개수
+        
+        // 4. [DOM 조작]: 텍스트를 배치 단위로 분리하여 할당
+        sub_child.textContent = sub_child_hashes.slice(0, new_l).join('');
+        sub_child_continuation.textContent = sub_child_hashes.slice(new_l, l).join('');
+
+        // 5. 💡 [최적화된 정지 조건 검사]: BATCH_SIZE마다 한 번만 stop_condition() 호출
+        loop_counter++;
+        if (loop_counter % HEIGHT_CHECK_INTERVAL === 0 || new_l === 0) {
+            if(stop_condition()) return;
+        }
+      }      
+      // 루프 완료 후 (모든 텍스트를 옮겼으나 오버플로우가 해소되지 않은 경우)
+      if(stop_condition()) return;
+	}
     // we simply move it to the next page if it is either:
     // - a node with no content (e.g. <img>)
     // - a header title (e.g. <h1>)
@@ -90,10 +137,7 @@ function move_children_forward_recursively (child, child_sibling, stop_condition
       if(sub_child.childNodes.length == 0 || sub_child.innerHTML == "") child.removeChild(sub_child);
       else if(!stop_condition()) {
         // the only case when it can be non empty should be when stop_condition is now true
-        console.log("sub_child:", sub_child, "that is in child:", child);
-        throw Error("Document editor is trying to remove a non-empty sub-child. This "
-      + "is a bug and should not happen. Please report a repeatable set of actions that "
-      + "leaded to this error to https://github.com/motla/vue-document-editor/issues/new");
+        throw Error("Document editor is trying to remove a non-empty sub-child");
       }
     }
   }
@@ -136,5 +180,7 @@ function move_children_backwards_with_merging (page_html_div, next_page_html_div
 
 export {
   move_children_forward_recursively,
-  move_children_backwards_with_merging
+  //move_children_backwards_with_merging,
+  //split_and_move_text_forward,
+  //move_overflowing_content_forward,
 };
